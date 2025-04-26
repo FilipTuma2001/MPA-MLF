@@ -1,0 +1,130 @@
+# Vylepsena verze tveho kodu
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+
+from keras.models import Sequential
+from keras.optimizers import Adam
+from keras.utils import to_categorical
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Input, BatchNormalization, Dropout
+from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix
+from sklearn.model_selection import train_test_split
+
+# Funkce na nacteni dat
+def load_data(dataset_dir, labes_dir):
+    labels_df = pd.read_csv(labes_dir)
+    labels_df = labels_df.sort_values('ID').reset_index(drop=True)
+    data_list = []
+    labels_list = []
+    for idx, row in labels_df.iterrows():
+        file_path = os.path.join(dataset_dir, f"{row['ID']}.npy")
+        data = np.load(file_path)
+        data_list.append(data)
+        labels_list.append(row['target'])
+    dataset = np.array(data_list)
+    dataset_labels = np.array(labels_list)
+    return dataset, dataset_labels
+
+# Cesty
+TRAIN_DIR = 'D:/MPC-EKT/8. semestr/MLF/projekt_v2/Train/'
+TEST_DIR = 'D:/MPC-EKT/8. semestr/MLF/projekt_v2//Test/'
+LABEL_PATH = 'D:/MPC-EKT/8. semestr/MLF/projekt_v2//label_train.csv'
+EMPTY_LABEL_PATH = 'D:/MPC-EKT/8. semestr/MLF/projekt_v2//test_format.csv'
+
+dataset, dataset_labels = load_data(TRAIN_DIR, LABEL_PATH)
+submition_data, _ = load_data(TEST_DIR, EMPTY_LABEL_PATH)
+
+# Data Augmentation (stejna)
+bts_1 = dataset[dataset_labels == 1]
+bts_0 = dataset[dataset_labels == 0]
+for k in range(2):
+    bts_0 = bts_0 + np.random.normal(0, 3+k, (bts_0.shape[0], bts_0.shape[1], bts_0.shape[2]))
+    dataset = np.append(dataset, bts_0, 0)
+    dataset_labels = np.append(dataset_labels, np.zeros(bts_0.shape[0]))
+num_of_bts0 = np.count_nonzero(dataset_labels == 0)
+
+for k in range(num_of_bts0 // bts_1.shape[0]):
+    bts_1 = bts_1 + np.random.normal(0, 3+k//3, (bts_1.shape[0], bts_1.shape[1], bts_1.shape[2]))
+    dataset = np.append(dataset, bts_1, 0)
+    dataset_labels = np.append(dataset_labels, np.ones(bts_1.shape[0]))
+
+bts_2 = dataset[dataset_labels == 2]
+for k in range(num_of_bts0 // bts_2.shape[0]):
+    bts_2 = bts_2 + np.random.normal(0, 3+k//3, (bts_2.shape[0], bts_2.shape[1], bts_2.shape[2]))
+    dataset = np.append(dataset, bts_2, 0)
+    dataset_labels = np.append(dataset_labels, 2 * np.ones(bts_2.shape[0]))
+
+# Split a normalizace
+x_train, x_test, y_train, y_test = train_test_split(dataset, dataset_labels, test_size=0.2, random_state=42)
+
+x_train_mean = np.mean(x_train)
+x_train_std = np.std(x_train)
+x_train_normalized = (x_train - x_train_mean) / x_train_std
+
+x_test_normalized = (x_test - x_train_mean) / x_train_std
+x_sub_normalized = (submition_data - x_train_mean) / x_train_std
+
+x_train_normalized = x_train_normalized.reshape(-1, 72, 48, 1)
+x_test_normalized = x_test_normalized.reshape(-1, 72, 48, 1)
+x_sub_normalized = x_sub_normalized.reshape(-1, 72, 48, 1)
+
+y_train_encoded = to_categorical(y_train, num_classes=3)
+y_test_encoded = to_categorical(y_test, num_classes=3)
+
+# Novy model
+model = Sequential()
+model.add(Input(shape=(72, 48, 1)))
+model.add(Conv2D(32, (3,3), activation='relu', padding='same'))
+model.add(BatchNormalization())
+model.add(Conv2D(64, (3,3), activation='relu', padding='same'))
+model.add(BatchNormalization())
+model.add(MaxPooling2D(pool_size=(2,2)))
+model.add(Dropout(0.25))
+
+model.add(Flatten())
+model.add(Dense(128, activation='relu'))
+model.add(Dropout(0.5))
+model.add(Dense(3, activation='softmax'))
+
+optimizer = Adam(learning_rate=0.001)
+model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+# Trénink
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+lr_scheduler = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, verbose=1)
+
+history = model.fit(x_train_normalized, y_train_encoded, epochs=100, batch_size=32, validation_split=0.2, callbacks=[early_stopping, lr_scheduler])
+
+# Vyhodnoceni
+score = model.evaluate(x_test_normalized, y_test_encoded, verbose=1)
+print('Test loss:', score[0])
+print(f'Test accuracy: {score[1]*100:.2f}%')
+
+# Grafy
+plt.figure()
+plt.title('Loss')
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.legend(['Training', 'Validation'])
+plt.grid(True)
+
+plt.figure()
+plt.title('Accuracy')
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.legend(['Training', 'Validation'])
+plt.grid(True)
+plt.show()
+
+# Predikce a uložení
+y_pred = model.predict(x_sub_normalized)
+y_pred_classes = np.argmax(y_pred, axis=1)
+
+import csv
+with open('label_test_MT_v1.csv', mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(['ID', 'target'])
+    for i, value in enumerate(y_pred_classes):
+        writer.writerow([i, value])
